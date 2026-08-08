@@ -1,130 +1,45 @@
-# Smart Emergency Traffic v0.1.0
+# ClearPath AI
 
-Standalone FiveM client resource that makes ambient AI traffic react earlier and more predictably to a player-driven emergency vehicle using lights/sirens.
+Standalone FiveM resource that improves ambient AI traffic behaviour around responding emergency vehicles.
 
-## What v0.1.0 does
+## v0.1.3 full-shoulder patch
 
-- Detects AI road traffic well before the emergency vehicle reaches it.
-- Makes normal cars pull toward the driver's right side of the road.
-- Gives trucks, buses, commercial vehicles and utility vehicles earlier detection and gentler movement.
-- Detects vehicles towing trailers and gives them the earliest/slowest yield profile.
-- Uses a two-stage yield: drive toward a roadside target, then park/hold.
-- Lets vehicles clear a junction before attempting to pull over.
-- Uses wider shoulder offsets on highway nodes.
-- Ignores player-driven vehicles.
-- Ignores boats, aircraft and trains.
-- Can avoid scripted mission entities to reduce conflicts with other resources.
-- Releases AI back to normal wandering once the emergency vehicle has passed or the siren stops.
-- Optionally uses FiveM's native NPC siren-reaction override to make ambient traffic prefer pulling right.
-- Supports custom emergency vehicle spawn names.
-- Includes an export/event for custom ELS or siren-controller integration.
+This patch makes the first build much more assertive and adds diagnostics so you can see exactly why a vehicle is or is not being handled.
 
-## Installation
+### Changes from v0.1.2
 
-1. Put the folder in your server resources, for example:
+- Greatly tightened the final pull-over tolerance so vehicles do not stop while straddling the live lane and shoulder.
+- Reduced the park radius from 20.0 m to 2.5 m.
+- Reduced the distance at which ClearPath considers the shoulder target reached from 9.0 m to 2.75 m.
+- Added a slower final-approach phase for the last 14 m of the manoeuvre.
+- Increased roadside offsets for cars, heavy vehicles and trailer combinations.
+- Increased the additional highway shoulder offset.
+- Added hold-drift detection: if a yielded vehicle creeps back toward the lane before the responder has passed, ClearPath sends it back toward the shoulder target.
+- Retains the v0.1.2 delayed rejoin/pass-clearance logic.
 
-   `resources/[standalone]/smart_emergency_traffic`
+These values are configurable in `config.lua`.
 
-2. Add this to `server.cfg`:
+## Install
 
-   `ensure smart_emergency_traffic`
+Place `clearpath_ai` in your server resources, for example:
 
-3. Restart the resource/server.
-
-No framework, database, ox_lib, QBCore or ESX dependency is required.
-
-## Recommended first test
-
-Use a normal GTA emergency vehicle first (Police/EMS/Fire) to establish a baseline:
-
-1. Drive behind normal city traffic with the siren off. AI should behave normally.
-2. Activate the audible siren and approach traffic from roughly 100-130 metres away.
-3. Test a sedan, van, bus/utility vehicle and semi/trailer.
-4. Test a multi-lane road/highway.
-5. Test an intersection and confirm AI tends to clear it before pulling over.
-6. Turn the siren off and confirm held traffic returns to normal driving.
-
-## Activation modes
-
-In `config.lua`:
-
-- `audio` (default): full system activates only when siren audio is active.
-- `lights`: activates from the emergency warning/siren state even without audio.
-- `either`: either state can activate it.
-
-If your custom siren resource does not expose its state through GTA/FiveM's normal siren natives, call the export:
-
-```lua
-exports['smart_emergency_traffic']:SetForcedActive(true)
-exports['smart_emergency_traffic']:SetForcedActive(false)
+```text
+resources/[standalone]/clearpath_ai
 ```
 
-Or locally trigger:
+Add:
 
-```lua
-TriggerEvent('smart_emergency_traffic:setForcedActive', true)
-TriggerEvent('smart_emergency_traffic:setForcedActive', false)
+```cfg
+ensure clearpath_ai
 ```
 
-## Custom emergency vehicles
+## First diagnostic test
 
-If an addon police/fire/ambulance vehicle is not reported as class 18, add its spawn name:
+1. Restart the resource.
+2. Enter an emergency vehicle as the driver.
+3. Run `/clearpathdebug`.
+4. Turn on emergency lights/siren and approach AI traffic.
+5. Watch the debug line for `valid AI`, `relevant`, `yielding`, and `control failures`.
+6. If `active` appears to be the problem, run `/clearpathforce` temporarily. If traffic then reacts, your siren controller needs integration or a different activation mode.
 
-```lua
-Config.AdditionalEmergencyVehicles = {
-    'valor10charger',
-    'myambulance',
-    'customfiretruck',
-}
-```
-
-## Truck behaviour
-
-Heavy classes (Industrial, Utility, Vans, Service and Commercial) use:
-
-- 180 m default detection.
-- Lower target speed.
-- More distance before moving toward the roadside.
-- Larger roadside offset.
-
-A towing vehicle uses the trailer profile:
-
-- 200 m default detection.
-- Slowest yield speed.
-- Longest lead-in distance.
-- Largest roadside offset.
-
-These values are all configurable.
-
-## Debugging
-
-Run:
-
-`/sirentrafficdebug`
-
-This toggles client console debug messages for assignment, holding and release decisions.
-
-## Important tuning notes
-
-GTA V road geometry and AI pathfinding vary significantly between downtown streets, highways, custom maps and addon MLO areas. The values in v0.1.0 are conservative starting values, not a promise that every road will be perfect.
-
-The most useful settings to tune after your first live test are:
-
-- `DetectionDistance`
-- `HeavyDetectionDistance`
-- `TrailerDetectionDistance`
-- `CarPullOverOffset`
-- `HeavyPullOverOffset`
-- `TrailerPullOverOffset`
-- `HighwayExtraOffset`
-- `CarYieldSpeed`
-- `HeavyYieldSpeed`
-- `TrailerYieldSpeed`
-- `CorridorGrowth`
-- `CorridorMaxWidth`
-
-## Compatibility
-
-The resource guards the newer `OverrideReactionToVehicleSiren` native before using it. If the native is unavailable on a particular client build, the predictive yielding code still runs without that enhancement.
-
-If another resource aggressively retasks ambient drivers every frame, the two resources can fight over AI control. In that case either disable that conflicting behaviour or set this resource's mission-entity protection/configuration appropriately.
+Addon emergency vehicles that are not GTA class 18 can be added in `Config.AdditionalEmergencyVehicles`.

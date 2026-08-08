@@ -1,9 +1,9 @@
 fx_version 'cerulean'
 game 'gta5'
 
-author 'Custom FiveM Resource'
+author 'IIIIFOGGYIIII'
 description 'Standalone predictive AI traffic yielding for emergency vehicles.'
-version '0.1.0'
+version '0.1.3'
 
 shared_script 'config.lua'
 
