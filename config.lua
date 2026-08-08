@@ -63,23 +63,45 @@ Config.JunctionClearReleaseDistance = 14.0
 Config.JunctionEmergencyClearDistance = 20.0
 Config.JunctionWaitApproachSpeed = 5.0
 Config.JunctionClearSpeed = 10.5
+Config.JunctionTurnClearSpeed = 8.0
 Config.JunctionTaskRefreshMs = 650
+Config.JunctionClearHeadingRelease = 28.0
+Config.JunctionClearDistanceRelease = 20.0
+Config.JunctionCollisionSafetyRadius = 5.5
 
 -- Turn-lane protection. Vehicles in dedicated left-turn/inside lanes must not cut
--- across live lanes to reach the right shoulder. v0.1.9 deliberately locks these
--- vehicles in-lane with a straight braking action instead of preserving GTA's
--- ambient route task; preserving the task allowed GTA's own siren response to fight
--- ClearPath and produce left/right steering oscillation.
+-- across live lanes to reach the right shoulder. v0.1.10 keeps these vehicles in-lane
+-- and adds a responder safety envelope so a holding vehicle cannot drift/steer into
+-- the emergency vehicle while the responder is alongside.
 Config.TurnLaneProtectionEnabled = true
 Config.TurnLaneDetectionDistance = 58.0
 Config.TurnLaneSampleStep = 4.0
 Config.TurnLaneUnsafeExtraRightShift = 2.75
 Config.TurnLaneBrakeAction = 27 -- TASK_VEHICLE_TEMP_ACTION: brake until stopped/time ends
 Config.TurnLaneBrakeDurationMs = 1400
-Config.TurnLaneRefreshMs = 850
+Config.TurnLaneRefreshMs = 700
+Config.TurnLaneSteeringLockEnabled = true
+Config.TurnLaneSteeringLockMaxSpeed = 4.5 -- m/s; only neutralise wheels once reasonably slow
+Config.TurnLaneHandbrakeBelowSpeed = 0.65
 Config.TurnLaneHeadingRelease = 38.0
 Config.TurnLaneReleaseDistance = 28.0
 Config.TurnIntentMemoryMs = 2200
+
+
+-- Responder safety envelope. This is a final guard against an AI yield target or
+-- turn-lane hold carrying a civilian vehicle into the emergency vehicle itself.
+-- If the straight-line manoeuvre toward a ClearPath target would pass through this
+-- radius, the vehicle is held in its current lane instead. Managed traffic that gets
+-- very close alongside the responder is also hard-held until there is separation.
+Config.ResponderSafetyEnabled = true
+Config.ResponderSafetyRadius = 8.5
+Config.ResponderSafetyPathRadius = 9.5
+Config.ResponderSafetyHoldRefreshMs = 550
+Config.ResponderSafetyBrakeAction = 27
+Config.ResponderSafetyBrakeDurationMs = 1100
+Config.ResponderSafetySteeringLockMaxSpeed = 5.0
+Config.ResponderSafetyHandbrakeBelowSpeed = 0.65
+Config.ResponderSafetyReleaseRadius = 11.5
 
 -- Roadside target sampling.
 Config.CarAheadDistance = 34.0

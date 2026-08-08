@@ -2,20 +2,21 @@
 
 Standalone FiveM resource that improves ambient AI traffic behaviour around responding emergency vehicles.
 
-## v0.1.9 — Stable turn-lane hold
+## v0.1.10 — Responder safety envelope
 
-This patch fixes left-turn/inside-lane vehicles steering back and forth while an emergency vehicle approaches.
+This patch fixes protected turn-lane/nearby traffic drifting sideways into the emergency vehicle while being held.
 
-### Turn-lane behaviour
+### Safety behaviour
 
-- Detects AI vehicles signalling left near a junction.
-- Remembers a recently observed left indicator across the normal indicator blink cycle.
-- Detects when a right-shoulder yield would require an unsafe multi-lane lateral move.
-- Uses a dedicated straight braking/hold action instead of preserving GTA's ambient turn task.
-- Prevents GTA's own siren response and ClearPath from fighting over the same steering task.
-- Keeps the vehicle in its current turn lane while the responder approaches/passes.
-- Releases back to normal ambient driving once the emergency vehicle is safely clear or the vehicle has cleared the junction.
-- Keeps the global FiveM siren-reaction override disabled by default so it cannot independently force turn-lane traffic right.
+- Adds a hard responder safety envelope around the active emergency vehicle.
+- Rejects ClearPath yield targets whose projected path would cut through that envelope.
+- Converts unsafe nearby manoeuvres into an in-lane hold instead of a right-side pull-over.
+- Neutralises steering once held traffic has slowed enough, preventing residual turn input from carrying it sideways.
+- Applies the handbrake only once the AI is almost stopped, avoiding abrupt high-speed locking.
+- Lets committed junction traffic keep its existing GTA route instead of forcing a straight-line clear target, so cars already turning do not get driven across the responder.
+- Uses a tighter emergency collision radius even for committed junction traffic as a final no-contact safeguard.
+- Releases the safety hold only after the responder has regained separation.
+- Retains the v0.1.9 turn-lane protection, Night ERS safeguards and junction state machine.
 
 ## Existing behaviour
 
@@ -58,7 +59,7 @@ ClearPath prints a startup banner similar to:
 
 ```text
 ==================================================================
-ClearPath AI | Version v0.1.9
+ClearPath AI | Version v0.1.10
 Intelligent Emergency Traffic Yielding
 Resource started successfully.
 ==================================================================

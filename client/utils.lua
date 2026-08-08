@@ -75,6 +75,39 @@ function ClearPath.GetForwardProgressFromPoint(entity, point, heading)
     return ClearPath.Dot2D(delta, forward)
 end
 
+function ClearPath.DistancePointToSegment2D(point, segmentStart, segmentEnd)
+    local abx = segmentEnd.x - segmentStart.x
+    local aby = segmentEnd.y - segmentStart.y
+    local apx = point.x - segmentStart.x
+    local apy = point.y - segmentStart.y
+    local lengthSq = (abx * abx) + (aby * aby)
+
+    if lengthSq <= 0.0001 then
+        local dx = point.x - segmentStart.x
+        local dy = point.y - segmentStart.y
+        return math.sqrt((dx * dx) + (dy * dy))
+    end
+
+    local t = ((apx * abx) + (apy * aby)) / lengthSq
+    t = ClearPath.Clamp(t, 0.0, 1.0)
+
+    local closestX = segmentStart.x + (abx * t)
+    local closestY = segmentStart.y + (aby * t)
+    local dx = point.x - closestX
+    local dy = point.y - closestY
+    return math.sqrt((dx * dx) + (dy * dy))
+end
+
+function ClearPath.TargetPathPassesNearEntity(vehicle, target, entity, radius)
+    if vehicle == 0 or entity == 0 or not target then return false, math.huge end
+    if not DoesEntityExist(vehicle) or not DoesEntityExist(entity) then return false, math.huge end
+
+    local start = GetEntityCoords(vehicle)
+    local point = GetEntityCoords(entity)
+    local distance = ClearPath.DistancePointToSegment2D(point, start, target)
+    return distance <= (radius or 0.0), distance
+end
+
 function ClearPath.Debug(message)
     if Config.Debug then
         print(('[clearpath_ai] %s'):format(message))

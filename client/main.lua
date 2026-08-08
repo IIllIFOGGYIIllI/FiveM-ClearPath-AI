@@ -345,6 +345,7 @@ end
 local function restoreAmbientDriver(driver, vehicle)
     SetVehicleIndicatorLights(vehicle, 0, false)
     SetVehicleIndicatorLights(vehicle, 1, false)
+    SetVehicleHandbrake(vehicle, false)
     SetBlockingOfNonTemporaryEvents(driver, false)
     SetPedKeepTask(driver, false)
     SetDriveTaskCruiseSpeed(driver, Config.RejoinSpeed)
@@ -358,10 +359,16 @@ local function releaseVehicle(vehicle, reason, skipAmbientRestore)
     if not state then return end
 
     if DoesEntityExist(vehicle) then
+        -- Always remove ClearPath-only physical controls, even when a compatibility
+        -- integration asks us not to replace the scripted AI task itself.
+        SetVehicleIndicatorLights(vehicle, 0, false)
+        SetVehicleIndicatorLights(vehicle, 1, false)
+        SetVehicleHandbrake(vehicle, false)
+
         local driver = GetPedInVehicleSeat(vehicle, -1)
         if not skipAmbientRestore and driver ~= 0 and DoesEntityExist(driver) and not IsPedAPlayer(driver) then
             if ClearPath.TryControl(vehicle) and ClearPath.TryControl(driver) then
-                    restoreAmbientDriver(driver, vehicle)
+                restoreAmbientDriver(driver, vehicle)
             end
         end
     end
@@ -387,11 +394,26 @@ local function releaseAll(reason)
     end
 end
 
+local function neutraliseHeldSteering(vehicle, maxSpeed)
+    if vehicle == 0 or not DoesEntityExist(vehicle) then return end
+    if GetEntitySpeed(vehicle) > (maxSpeed or 0.0) then return end
+
+    -- Steering bias has to be refreshed to remain effective. The per-frame thread
+    -- below continues applying it while the vehicle remains in a protected hold.
+    if type(SetVehicleSteerBias) == 'function' then
+        SetVehicleSteerBias(vehicle, 0.0)
+    end
+    if type(SetVehicleSteeringAngle) == 'function' then
+        SetVehicleSteeringAngle(vehicle, 0.0)
+    end
+end
+
 local function applyTurnLaneHold(vehicle, driver, state)
-    -- Do not preserve GTA's ambient turn task here. GTA's built-in siren response can
-    -- modify that same task and make a left-turn-lane vehicle steer left/right in a
-    -- loop. A temporary straight braking action keeps the wheels stable and the
-    -- vehicle inside its current lane until the responder is safely clear.
+    -- Brake in the current lane and, once the vehicle is slow enough, force the
+    -- steering back to neutral. This prevents residual turn steering from carrying
+    -- the vehicle sideways into the responding unit while it is being held.
+    SetVehicleIndicatorLights(vehicle, 0, false)
+    SetVehicleIndicatorLights(vehicle, 1, false)
     SetBlockingOfNonTemporaryEvents(driver, true)
     SetPedKeepTask(driver, true)
     SetDriveTaskDrivingStyle(driver, Config.DrivingStyle)
@@ -403,10 +425,58 @@ local function applyTurnLaneHold(vehicle, driver, state)
         Config.TurnLaneBrakeAction,
         Config.TurnLaneBrakeDurationMs
     )
+
+    if Config.TurnLaneSteeringLockEnabled then
+        neutraliseHeldSteering(vehicle, Config.TurnLaneSteeringLockMaxSpeed)
+    end
+    if GetEntitySpeed(vehicle) <= Config.TurnLaneHandbrakeBelowSpeed then
+        SetVehicleHandbrake(vehicle, true)
+    end
+
+    state.lastTaskAt = GetGameTimer()
+end
+
+local function applyResponderSafetyHold(vehicle, driver, state)
+    SetVehicleIndicatorLights(vehicle, 0, false)
+    SetVehicleIndicatorLights(vehicle, 1, false)
+    SetBlockingOfNonTemporaryEvents(driver, true)
+    SetPedKeepTask(driver, true)
+    SetDriveTaskCruiseSpeed(driver, 0.0)
+    SetDriveTaskMaxCruiseSpeed(driver, 0.0)
+
+    TaskVehicleTempAction(
+        driver,
+        vehicle,
+        Config.ResponderSafetyBrakeAction,
+        Config.ResponderSafetyBrakeDurationMs
+    )
+
+    neutraliseHeldSteering(vehicle, Config.ResponderSafetySteeringLockMaxSpeed)
+    if GetEntitySpeed(vehicle) <= Config.ResponderSafetyHandbrakeBelowSpeed then
+        SetVehicleHandbrake(vehicle, true)
+    end
+
+    state.lastSafetyTaskAt = GetGameTimer()
+end
+
+local function applyJunctionClearPreserve(vehicle, driver, state)
+    -- A committed intersection vehicle may be going straight OR already executing a
+    -- turn. Do not replace its route with a straight DriveToCoord target: that can
+    -- cut a turning car across the responder. Instead suppress panic events and let
+    -- GTA finish the route it had already committed to, with a capped clear speed.
+    SetVehicleHandbrake(vehicle, false)
+    SetVehicleIndicatorLights(vehicle, 0, false)
+    SetVehicleIndicatorLights(vehicle, 1, false)
+    SetBlockingOfNonTemporaryEvents(driver, true)
+    SetPedKeepTask(driver, true)
+    SetDriveTaskDrivingStyle(driver, Config.DrivingStyle)
+    SetDriveTaskCruiseSpeed(driver, Config.JunctionTurnClearSpeed)
+    SetDriveTaskMaxCruiseSpeed(driver, Config.JunctionTurnClearSpeed)
     state.lastTaskAt = GetGameTimer()
 end
 
 local function applyYieldTask(vehicle, driver, state, requestedSpeed)
+    SetVehicleHandbrake(vehicle, false)
     if state.junctionMode then
         -- Cross-traffic should keep a predictable heading through/at the junction,
         -- not signal and attempt a roadside manoeuvre while occupying the conflict area.
@@ -467,8 +537,22 @@ local function assignYield(vehicle, driver, emergencyVehicle, profile)
         if not target then return end
 
         turnLanePreserve, turnLaneReason = shouldPreserveTurnLane(vehicle, target, profile)
+
+        -- Independent of turn-lane detection, never issue a yield target whose
+        -- straight-line manoeuvre would pass through the responding vehicle. This
+        -- catches awkward lane geometry and partially completed turns near junctions.
+        if not turnLanePreserve and Config.ResponderSafetyEnabled then
+            local unsafePath = ClearPath.TargetPathPassesNearEntity(
+                vehicle, target, emergencyVehicle, Config.ResponderSafetyPathRadius
+            )
+            if unsafePath then
+                turnLanePreserve = true
+                turnLaneReason = 'unsafe path near responder'
+            end
+        end
+
         if turnLanePreserve then
-            -- Turn-lane traffic gets a dedicated in-lane braking state. Do not
+            -- Protected lane traffic gets a dedicated in-lane braking state. Do not
             -- calculate or chase a right-shoulder target from this point onward.
             target = nil
             targetHeading = nil
@@ -499,6 +583,7 @@ local function assignYield(vehicle, driver, emergencyVehicle, profile)
         assignedAt = now,
         lastRelevantAt = now,
         lastTaskAt = 0,
+        lastSafetyTaskAt = 0,
         lastParkRefreshAt = 0,
         passedAt = nil,
     }
@@ -507,11 +592,11 @@ local function assignYield(vehicle, driver, emergencyVehicle, profile)
 
     if state.state == 'TURN_LANE_HOLD' then
         applyTurnLaneHold(vehicle, driver, state)
+    elseif state.state == 'JUNCTION_CLEARING' then
+        applyJunctionClearPreserve(vehicle, driver, state)
     else
         local initialSpeed = nil
-        if state.state == 'JUNCTION_CLEARING' then
-            initialSpeed = Config.JunctionClearSpeed
-        elseif state.state == 'JUNCTION_WAIT_APPROACH' then
+        if state.state == 'JUNCTION_WAIT_APPROACH' then
             initialSpeed = Config.JunctionWaitApproachSpeed
         end
         applyYieldTask(vehicle, driver, state, initialSpeed)
@@ -591,6 +676,31 @@ local function updateYieldState(vehicle, state, activeEmergencyVehicle)
         vehicleCoords.y,
         vehicleCoords.z
     )
+    local distanceFromEmergency = ClearPath.Distance(vehicleCoords, emergencyCoords)
+
+    -- Last-resort collision guard. Never allow a shoulder/turn-lane task to keep
+    -- moving a civilian through the responder's immediate space. Committed junction
+    -- traffic gets a smaller guard radius so it can normally finish clearing, while
+    -- still being stopped before direct contact.
+    local safetyRadius = Config.ResponderSafetyRadius
+    if state.junctionMode == 'clear' or state.state == 'JUNCTION_CLEARING' then
+        -- Committed cross-traffic normally needs to keep clearing the junction, but
+        -- direct contact still wins over flow. Only hard-stop it if it enters a much
+        -- tighter collision radius around the responder.
+        safetyRadius = Config.JunctionCollisionSafetyRadius
+    end
+
+    if Config.ResponderSafetyEnabled and distanceFromEmergency <= safetyRadius then
+        if not ClearPath.TryControl(vehicle) or not ClearPath.TryControl(driver) then return end
+        if now - (state.lastSafetyTaskAt or 0) >= Config.ResponderSafetyHoldRefreshMs then
+            applyResponderSafetyHold(vehicle, driver, state)
+        end
+        return
+    elseif distanceFromEmergency >= Config.ResponderSafetyReleaseRadius then
+        -- Ensure a handbrake applied by the close-proximity guard is removed before
+        -- the normal state machine resumes.
+        SetVehicleHandbrake(vehicle, false)
+    end
 
     -- Junction cross-traffic uses its own conflict-point state machine. A vehicle
     -- that has room waits before the crossing; one that is already committed keeps
@@ -608,13 +718,23 @@ local function updateYieldState(vehicle, state, activeEmergencyVehicle)
         )
 
         if state.state == 'JUNCTION_CLEARING' then
-            if vehicleProgress >= Config.JunctionClearReleaseDistance then
+            local conflictDistance = ClearPath.Distance(vehicleCoords, state.conflictPoint)
+            local headingChange = math.abs(ClearPath.HeadingDelta(
+                GetEntityHeading(vehicle), state.vehicleHeading
+            ))
+
+            -- Straight traffic can release from forward progress. Turning traffic is
+            -- considered clear once it has changed heading and moved away from the
+            -- conflict point. This avoids forcing a turning car down its old heading.
+            if vehicleProgress >= Config.JunctionClearReleaseDistance
+                or (headingChange >= Config.JunctionClearHeadingRelease
+                    and conflictDistance >= Config.JunctionClearDistanceRelease) then
                 releaseVehicle(vehicle, 'junction cleared')
                 return
             end
 
             if now - state.lastTaskAt >= Config.JunctionTaskRefreshMs then
-                applyYieldTask(vehicle, driver, state, Config.JunctionClearSpeed)
+                applyJunctionClearPreserve(vehicle, driver, state)
             end
             return
         end
@@ -632,7 +752,7 @@ local function updateYieldState(vehicle, state, activeEmergencyVehicle)
                 )
                 state.state = 'JUNCTION_CLEARING'
                 state.junctionMode = 'clear'
-                applyYieldTask(vehicle, driver, state, Config.JunctionClearSpeed)
+                applyJunctionClearPreserve(vehicle, driver, state)
                 return
             end
 
@@ -706,7 +826,6 @@ local function updateYieldState(vehicle, state, activeEmergencyVehicle)
         return
     end
 
-    local distanceFromEmergency = ClearPath.Distance(vehicleCoords, emergencyCoords)
     -- If the emergency vehicle has diverted away while the AI is still ahead, release
     -- normally. When the AI is behind the responder, the stricter pass-clearance rules
     -- above take precedence so it cannot merge back too early.
@@ -866,6 +985,35 @@ CreateThread(function()
         debugStats.nightERS = isNightERSRunning()
         debugStats.protected = countProtectedNetIds()
         Wait(1000)
+    end
+end)
+
+CreateThread(function()
+    while true do
+        local anyHeld = false
+        for vehicle, state in pairs(yieldStates) do
+            if DoesEntityExist(vehicle) then
+                local closeSafetyHold = false
+                if Config.ResponderSafetyEnabled and state.emergencyVehicle ~= 0
+                    and DoesEntityExist(state.emergencyVehicle) then
+                    local liveSafetyRadius = (state.junctionMode == 'clear' or state.state == 'JUNCTION_CLEARING')
+                        and Config.JunctionCollisionSafetyRadius
+                        or Config.ResponderSafetyRadius
+                    closeSafetyHold = ClearPath.Distance(
+                        GetEntityCoords(vehicle), GetEntityCoords(state.emergencyVehicle)
+                    ) <= liveSafetyRadius
+                end
+
+                if state.state == 'TURN_LANE_HOLD' or closeSafetyHold then
+                    anyHeld = true
+                    local maxSpeed = state.state == 'TURN_LANE_HOLD'
+                        and Config.TurnLaneSteeringLockMaxSpeed
+                        or Config.ResponderSafetySteeringLockMaxSpeed
+                    neutraliseHeldSteering(vehicle, maxSpeed)
+                end
+            end
+        end
+        Wait(anyHeld and 0 or 120)
     end
 end)
 
