@@ -65,17 +65,18 @@ Config.JunctionWaitApproachSpeed = 5.0
 Config.JunctionClearSpeed = 10.5
 Config.JunctionTaskRefreshMs = 650
 
--- Turn-lane/lane-preservation protection. Near junctions, ClearPath must not make
--- an AI vehicle cross several live lanes just to reach the right shoulder. Vehicles
--- signalling left, or vehicles whose calculated shoulder target would require an
--- unsafe multi-lane right shift, keep their existing ambient route/turn task and
--- simply reduce speed until the emergency vehicle is clear.
+-- Turn-lane protection. Vehicles in dedicated left-turn/inside lanes must not cut
+-- across live lanes to reach the right shoulder. v0.1.9 deliberately locks these
+-- vehicles in-lane with a straight braking action instead of preserving GTA's
+-- ambient route task; preserving the task allowed GTA's own siren response to fight
+-- ClearPath and produce left/right steering oscillation.
 Config.TurnLaneProtectionEnabled = true
 Config.TurnLaneDetectionDistance = 58.0
 Config.TurnLaneSampleStep = 4.0
 Config.TurnLaneUnsafeExtraRightShift = 2.75
-Config.TurnLanePreserveSpeed = 5.0
-Config.TurnLaneRefreshMs = 700
+Config.TurnLaneBrakeAction = 27 -- TASK_VEHICLE_TEMP_ACTION: brake until stopped/time ends
+Config.TurnLaneBrakeDurationMs = 1400
+Config.TurnLaneRefreshMs = 850
 Config.TurnLaneHeadingRelease = 38.0
 Config.TurnLaneReleaseDistance = 28.0
 Config.TurnIntentMemoryMs = 2200

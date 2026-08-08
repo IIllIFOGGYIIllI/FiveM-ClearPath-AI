@@ -2,20 +2,20 @@
 
 Standalone FiveM resource that improves ambient AI traffic behaviour around responding emergency vehicles.
 
-## v0.1.8 — Turn-lane preservation
+## v0.1.9 — Stable turn-lane hold
 
-This patch prevents traffic in dedicated left-turn/inside lanes from cutting across live lanes just to reach the right shoulder.
+This patch fixes left-turn/inside-lane vehicles steering back and forth while an emergency vehicle approaches.
 
 ### Turn-lane behaviour
 
 - Detects AI vehicles signalling left near a junction.
 - Remembers a recently observed left indicator across the normal indicator blink cycle.
-- Detects when the calculated right-shoulder target would require an unsafe multi-lane lateral move.
-- Preserves the AI driver's existing GTA route/turn task instead of replacing it with a right-shoulder drive task.
-- Temporarily reduces the vehicle's speed while the responder approaches.
-- Releases the vehicle as soon as it completes the turn/leaves the junction or the emergency vehicle is safely clear.
-- Does not overwrite the preserved turn route with `TaskVehicleDriveWander` when releasing it.
-- Disables the global FiveM siren-reaction override by default so it cannot independently force left-turn traffic to the right; ClearPath's per-vehicle logic remains active.
+- Detects when a right-shoulder yield would require an unsafe multi-lane lateral move.
+- Uses a dedicated straight braking/hold action instead of preserving GTA's ambient turn task.
+- Prevents GTA's own siren response and ClearPath from fighting over the same steering task.
+- Keeps the vehicle in its current turn lane while the responder approaches/passes.
+- Releases back to normal ambient driving once the emergency vehicle is safely clear or the vehicle has cleared the junction.
+- Keeps the global FiveM siren-reaction override disabled by default so it cannot independently force turn-lane traffic right.
 
 ## Existing behaviour
 
@@ -58,7 +58,7 @@ ClearPath prints a startup banner similar to:
 
 ```text
 ==================================================================
-ClearPath AI | Version v0.1.8
+ClearPath AI | Version v0.1.9
 Intelligent Emergency Traffic Yielding
 Resource started successfully.
 ==================================================================

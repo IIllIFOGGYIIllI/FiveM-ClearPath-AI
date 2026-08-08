@@ -353,17 +353,6 @@ local function restoreAmbientDriver(driver, vehicle)
     TaskVehicleDriveWander(driver, vehicle, Config.RejoinSpeed, Config.DrivingStyle)
 end
 
-local function restorePreservedDriver(driver)
-    -- Turn-lane preservation never replaces the NPC's original route/turn task.
-    -- Release our temporary speed/event limits without issuing DriveWander, which
-    -- would erase the left-turn route we deliberately preserved.
-    SetBlockingOfNonTemporaryEvents(driver, false)
-    SetPedKeepTask(driver, false)
-    SetDriveTaskCruiseSpeed(driver, Config.RejoinSpeed)
-    SetDriveTaskMaxCruiseSpeed(driver, Config.RejoinSpeed)
-    SetDriveTaskDrivingStyle(driver, Config.DrivingStyle)
-end
-
 local function releaseVehicle(vehicle, reason, skipAmbientRestore)
     local state = yieldStates[vehicle]
     if not state then return end
@@ -372,16 +361,13 @@ local function releaseVehicle(vehicle, reason, skipAmbientRestore)
         local driver = GetPedInVehicleSeat(vehicle, -1)
         if not skipAmbientRestore and driver ~= 0 and DoesEntityExist(driver) and not IsPedAPlayer(driver) then
             if ClearPath.TryControl(vehicle) and ClearPath.TryControl(driver) then
-                if state.preserveAmbientTask then
-                    restorePreservedDriver(driver)
-                else
                     restoreAmbientDriver(driver, vehicle)
-                end
             end
         end
     end
 
     cooldowns[vehicle] = GetGameTimer() + Config.ReleaseCooldownMs
+    leftTurnIntentMemory[vehicle] = nil
     yieldStates[vehicle] = nil
     ClearPath.Debug(('released vehicle %s (%s)'):format(vehicle, reason or 'unknown'))
 end
@@ -401,12 +387,22 @@ local function releaseAll(reason)
     end
 end
 
-local function applyTurnLanePreserve(driver, state)
+local function applyTurnLaneHold(vehicle, driver, state)
+    -- Do not preserve GTA's ambient turn task here. GTA's built-in siren response can
+    -- modify that same task and make a left-turn-lane vehicle steer left/right in a
+    -- loop. A temporary straight braking action keeps the wheels stable and the
+    -- vehicle inside its current lane until the responder is safely clear.
     SetBlockingOfNonTemporaryEvents(driver, true)
     SetPedKeepTask(driver, true)
     SetDriveTaskDrivingStyle(driver, Config.DrivingStyle)
-    SetDriveTaskCruiseSpeed(driver, Config.TurnLanePreserveSpeed)
-    SetDriveTaskMaxCruiseSpeed(driver, Config.TurnLanePreserveSpeed)
+    SetDriveTaskCruiseSpeed(driver, 0.0)
+    SetDriveTaskMaxCruiseSpeed(driver, 0.0)
+    TaskVehicleTempAction(
+        driver,
+        vehicle,
+        Config.TurnLaneBrakeAction,
+        Config.TurnLaneBrakeDurationMs
+    )
     state.lastTaskAt = GetGameTimer()
 end
 
@@ -472,8 +468,8 @@ local function assignYield(vehicle, driver, emergencyVehicle, profile)
 
         turnLanePreserve, turnLaneReason = shouldPreserveTurnLane(vehicle, target, profile)
         if turnLanePreserve then
-            -- Keep GTA's existing route/turn task. There is intentionally no
-            -- replacement coordinate target in this mode.
+            -- Turn-lane traffic gets a dedicated in-lane braking state. Do not
+            -- calculate or chase a right-shoulder target from this point onward.
             target = nil
             targetHeading = nil
         end
@@ -483,7 +479,7 @@ local function assignYield(vehicle, driver, emergencyVehicle, profile)
     if junctionPlan then
         initialState = junctionPlan.mode == 'clear' and 'JUNCTION_CLEARING' or 'JUNCTION_WAIT_APPROACH'
     elseif turnLanePreserve then
-        initialState = 'TURN_LANE_PRESERVE'
+        initialState = 'TURN_LANE_HOLD'
     end
 
     local state = {
@@ -496,7 +492,7 @@ local function assignYield(vehicle, driver, emergencyVehicle, profile)
         junctionMode = junctionPlan and junctionPlan.mode or nil,
         turnLaneMode = turnLanePreserve,
         turnLaneReason = turnLaneReason,
-        preserveAmbientTask = turnLanePreserve,
+        preserveAmbientTask = false,
         conflictPoint = junctionPlan and junctionPlan.conflictPoint or nil,
         vehicleHeading = junctionPlan and junctionPlan.vehicleHeading or (turnLanePreserve and GetEntityHeading(vehicle) or nil),
         emergencyHeading = junctionPlan and junctionPlan.emergencyHeading or nil,
@@ -509,8 +505,8 @@ local function assignYield(vehicle, driver, emergencyVehicle, profile)
 
     yieldStates[vehicle] = state
 
-    if state.state == 'TURN_LANE_PRESERVE' then
-        applyTurnLanePreserve(driver, state)
+    if state.state == 'TURN_LANE_HOLD' then
+        applyTurnLaneHold(vehicle, driver, state)
     else
         local initialSpeed = nil
         if state.state == 'JUNCTION_CLEARING' then
@@ -719,7 +715,7 @@ local function updateYieldState(vehicle, state, activeEmergencyVehicle)
         return
     end
 
-    if state.state == 'TURN_LANE_PRESERVE' then
+    if state.state == 'TURN_LANE_HOLD' then
         if not ClearPath.TryControl(vehicle) or not ClearPath.TryControl(driver) then return end
 
         local headingChange = math.abs(ClearPath.HeadingDelta(GetEntityHeading(vehicle), state.vehicleHeading))
@@ -729,9 +725,9 @@ local function updateYieldState(vehicle, state, activeEmergencyVehicle)
             Config.TurnLaneSampleStep
         )
 
-        -- Once the vehicle has actually turned away from the responder's route, or
-        -- has moved beyond the junction, stop constraining it immediately. Its
-        -- original ambient navigation task is still intact and can continue normally.
+        -- If momentum has already carried the vehicle through a meaningful turn, or
+        -- it has moved beyond the junction, release it. Otherwise keep applying the
+        -- straight brake lock so GTA cannot oscillate the steering under siren panic.
         if headingChange >= Config.TurnLaneHeadingRelease
             and distanceFromEmergency >= Config.TurnLaneReleaseDistance then
             releaseVehicle(vehicle, 'turn lane cleared path')
@@ -744,7 +740,7 @@ local function updateYieldState(vehicle, state, activeEmergencyVehicle)
         end
 
         if now - state.lastTaskAt >= Config.TurnLaneRefreshMs then
-            applyTurnLanePreserve(driver, state)
+            applyTurnLaneHold(vehicle, driver, state)
         end
         return
     end
