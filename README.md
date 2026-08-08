@@ -2,22 +2,22 @@
 
 Standalone FiveM resource that improves ambient AI traffic behaviour around responding emergency vehicles.
 
-## v0.1.3 full-shoulder patch
+## v0.1.4 — Night ERS compatibility
 
-This patch makes the first build much more assertive and adds diagnostics so you can see exactly why a vehicle is or is not being handled.
+This patch keeps ClearPath focused on **ordinary ambient traffic** and prevents it from taking over AI that is already being controlled by Nights Software Emergency Response Simulator (ERS) or another gameplay resource.
 
-### Changes from v0.1.2
+### Night ERS safeguards
 
-- Greatly tightened the final pull-over tolerance so vehicles do not stop while straddling the live lane and shoulder.
-- Reduced the park radius from 20.0 m to 2.5 m.
-- Reduced the distance at which ClearPath considers the shoulder target reached from 9.0 m to 2.75 m.
-- Added a slower final-approach phase for the last 14 m of the manoeuvre.
-- Increased roadside offsets for cars, heavy vehicles and trailer combinations.
-- Increased the additional highway shoulder offset.
-- Added hold-drift detection: if a yielded vehicle creeps back toward the lane before the responder has passed, ClearPath sends it back toward the shoulder target.
-- Retains the v0.1.2 delayed rejoin/pass-clearance logic.
+- Detects `night_ers` automatically when the resource is running.
+- Protects ERS/scripted mission vehicles and drivers from ClearPath tasks.
+- Protects fleeing ERS drivers as a pursuit-safe fallback.
+- Protects drivers actively in combat with the player.
+- Listens for the documented `ErsIntegration::OnPursuitStarted` and `ErsIntegration::OnPursuitEnded` lifecycle events and synchronizes the protected suspect network ID to nearby/all ClearPath clients when an ID is available.
+- If a vehicle becomes protected **after** ClearPath already started yielding it, ClearPath immediately releases that vehicle and stops replacing its driving task.
+- Disables ClearPath's global Cfx siren-reaction override while Night ERS is running. This is important because that native affects pedestrian-driven traffic globally; normal ambient traffic still receives ClearPath's own per-vehicle predictive yield tasks.
+- Adds generic protection exports so other scripts can mark their own scripted peds/vehicles as off-limits to ClearPath.
 
-These values are configurable in `config.lua`.
+This means an ERS pursuit suspect should continue fleeing normally instead of suddenly trying to pull onto the shoulder because the pursuing police vehicle has a siren active.
 
 ## Install
 
@@ -33,13 +33,46 @@ Add:
 ensure clearpath_ai
 ```
 
-## First diagnostic test
+If you use Night ERS, start it before ClearPath where practical:
 
-1. Restart the resource.
-2. Enter an emergency vehicle as the driver.
-3. Run `/clearpathdebug`.
-4. Turn on emergency lights/siren and approach AI traffic.
-5. Watch the debug line for `valid AI`, `relevant`, `yielding`, and `control failures`.
-6. If `active` appears to be the problem, run `/clearpathforce` temporarily. If traffic then reacts, your siren controller needs integration or a different activation mode.
+```cfg
+ensure night_ers
+ensure clearpath_ai
+```
 
-Addon emergency vehicles that are not GTA class 18 can be added in `Config.AdditionalEmergencyVehicles`.
+ClearPath does **not** require Night ERS; the integration is optional and detected automatically.
+
+## Debug
+
+Use:
+
+```text
+/clearpathdebug
+```
+
+The debug panel now also shows whether Night ERS is running, how many network IDs are explicitly protected, and whether the global siren-reaction override is active.
+
+## Compatibility API
+
+Client-side:
+
+```lua
+exports['clearpath_ai']:SetEntityProtected(vehicleOrPed, true)
+exports['clearpath_ai']:SetEntityProtected(vehicleOrPed, false)
+
+exports['clearpath_ai']:SetNetIdProtected(netId, true)
+exports['clearpath_ai']:SetNetIdProtected(netId, false)
+```
+
+Server-side:
+
+```lua
+exports['clearpath_ai']:SetProtectedNetId(netId, true)
+exports['clearpath_ai']:SetProtectedNetId(netId, false)
+```
+
+These hooks let any scripted pursuit/callout resource tell ClearPath not to alter a particular AI entity.
+
+## Current behaviour retained
+
+v0.1.4 retains the v0.1.3 full-shoulder yielding changes, truck/trailer profiles, delayed merge-back behaviour, debug tools and configurable detection distances.

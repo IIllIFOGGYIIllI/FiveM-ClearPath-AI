@@ -108,6 +108,29 @@ Config.HeavyVehicleClasses = {
 Config.UseNativeSirenReactionOverride = true
 Config.NativeSirenReaction = 1 -- 0 left, 1 right, 2 stop
 
+-- Compatibility safeguards. ClearPath should only manage ordinary ambient traffic,
+-- never vehicles/peds currently being controlled by another gameplay resource.
+Config.Compatibility = {
+    NightERS = {
+        Enabled = true,
+        ResourceName = 'night_ers',
+
+        -- ERS uses scripted/mission entities for callouts, traffic stops, pursuits and
+        -- backup. When ERS is running, leave those entities completely alone.
+        ProtectMissionEntities = true,
+
+        -- Pursuit suspects are normally fleeing/scripted. These fallbacks protect
+        -- them even if an ERS pursuit event payload changes between versions.
+        ProtectFleeingDrivers = true,
+        ProtectCombatDrivers = true,
+
+        -- The global siren-reaction override changes GTA behaviour for every ambient
+        -- NPC on the client. Disable it while ERS is running so it cannot affect an
+        -- ERS suspect; ClearPath's per-vehicle tasks still handle normal traffic.
+        DisableGlobalSirenOverride = true,
+    },
+}
+
 -- Debug/test commands.
 Config.Debug = false
 Config.DebugCommand = 'clearpathdebug'

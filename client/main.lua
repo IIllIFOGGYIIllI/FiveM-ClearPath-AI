@@ -2,6 +2,10 @@ local yieldStates = {}
 local cooldowns = {}
 local emergencyModelHashes = {}
 local forcedActive = false
+local protectedNetIds = {}
+local localProtectedEntities = {}
+local nativeOverrideApplied = false
+
 
 local debugStats = {
     pool = 0,
@@ -13,7 +17,140 @@ local debugStats = {
     emergencyClass = -1,
     sirenOn = false,
     audioOn = false,
+    nightERS = false,
+    protected = 0,
 }
+
+
+local function getNightERSConfig()
+    return Config.Compatibility and Config.Compatibility.NightERS or nil
+end
+
+local function isNightERSRunning()
+    local compat = getNightERSConfig()
+    if not compat or compat.Enabled ~= true then return false end
+    return GetResourceState(compat.ResourceName or 'night_ers') == 'started'
+end
+
+local function cleanupProtectedNetIds()
+    local now = GetGameTimer()
+    for netId, expiresAt in pairs(protectedNetIds) do
+        if expiresAt ~= 0 and expiresAt <= now then
+            protectedNetIds[netId] = nil
+        end
+    end
+end
+
+local function setNetIdProtected(netId, protected, durationMs)
+    netId = tonumber(netId)
+    if not netId or netId <= 0 then return false end
+
+    if protected then
+        local duration = tonumber(durationMs) or 0
+        protectedNetIds[netId] = duration > 0 and (GetGameTimer() + duration) or 0
+    else
+        protectedNetIds[netId] = nil
+    end
+    return true
+end
+
+local function setEntityProtected(entity, protected, durationMs)
+    if entity == 0 or not DoesEntityExist(entity) then return false end
+
+    if protected then
+        local duration = tonumber(durationMs) or 0
+        localProtectedEntities[entity] = duration > 0 and (GetGameTimer() + duration) or 0
+    else
+        localProtectedEntities[entity] = nil
+    end
+
+    if NetworkGetEntityIsNetworked(entity) then
+        setNetIdProtected(NetworkGetNetworkIdFromEntity(entity), protected, durationMs)
+    end
+    return true
+end
+
+local function isLocallyProtected(entity)
+    local expiresAt = localProtectedEntities[entity]
+    if expiresAt == nil then return false end
+    if expiresAt ~= 0 and expiresAt <= GetGameTimer() then
+        localProtectedEntities[entity] = nil
+        return false
+    end
+    return true
+end
+
+local function isNetEntityProtected(entity)
+    if entity == 0 or not DoesEntityExist(entity) or not NetworkGetEntityIsNetworked(entity) then
+        return false
+    end
+
+    local netId = NetworkGetNetworkIdFromEntity(entity)
+    local expiresAt = protectedNetIds[netId]
+    if expiresAt == nil then return false end
+    if expiresAt ~= 0 and expiresAt <= GetGameTimer() then
+        protectedNetIds[netId] = nil
+        return false
+    end
+    return true
+end
+
+local function isNightERSScriptedEntity(vehicle, driver)
+    if not isNightERSRunning() then return false end
+
+    local compat = getNightERSConfig()
+    if not compat then return false end
+
+    if compat.ProtectMissionEntities
+        and (IsEntityAMissionEntity(vehicle) or IsEntityAMissionEntity(driver)) then
+        return true
+    end
+
+    if compat.ProtectFleeingDrivers and IsPedFleeing(driver) then
+        return true
+    end
+
+    if compat.ProtectCombatDrivers and IsPedInCombat(driver, PlayerPedId()) then
+        return true
+    end
+
+    return false
+end
+
+local function isProtectedFromClearPath(vehicle, driver)
+    if isLocallyProtected(vehicle) or isLocallyProtected(driver) then return true end
+    if isNetEntityProtected(vehicle) or isNetEntityProtected(driver) then return true end
+    return isNightERSScriptedEntity(vehicle, driver)
+end
+
+local function countProtectedNetIds()
+    cleanupProtectedNetIds()
+    local count = 0
+    for _ in pairs(protectedNetIds) do count = count + 1 end
+    return count
+end
+
+local function updateNativeSirenOverride()
+    if not Config.UseNativeSirenReactionOverride or type(OverrideReactionToVehicleSiren) ~= 'function' then
+        if nativeOverrideApplied and type(OverrideReactionToVehicleSiren) == 'function' then
+            OverrideReactionToVehicleSiren(false, Config.NativeSirenReaction)
+            nativeOverrideApplied = false
+        end
+        return
+    end
+
+    local compat = getNightERSConfig()
+    local shouldApply = true
+    if compat and compat.Enabled and compat.DisableGlobalSirenOverride and isNightERSRunning() then
+        shouldApply = false
+    end
+
+    if shouldApply ~= nativeOverrideApplied then
+        OverrideReactionToVehicleSiren(shouldApply, Config.NativeSirenReaction)
+        nativeOverrideApplied = shouldApply
+        ClearPath.Debug(('global siren override %s'):format(shouldApply and 'enabled' or 'disabled for compatibility'))
+    end
+end
 
 local function cacheEmergencyModels()
     emergencyModelHashes = {}
@@ -95,6 +232,13 @@ local function isValidAIVehicle(vehicle, emergencyVehicle)
         return false
     end
 
+    -- Protect vehicles currently controlled by ERS (pursuits, traffic stops, callouts,
+    -- backup) or explicitly protected by another resource. ClearPath must never replace
+    -- their AI driving tasks.
+    if isProtectedFromClearPath(vehicle, driver) then
+        return false
+    end
+
     if Config.IgnoreActiveEmergencyAI
         and class == 18
         and (IsVehicleSirenOn(vehicle) or IsVehicleSirenAudioOn(vehicle)) then
@@ -143,13 +287,13 @@ local function restoreAmbientDriver(driver, vehicle)
     TaskVehicleDriveWander(driver, vehicle, Config.RejoinSpeed, Config.DrivingStyle)
 end
 
-local function releaseVehicle(vehicle, reason)
+local function releaseVehicle(vehicle, reason, skipAmbientRestore)
     local state = yieldStates[vehicle]
     if not state then return end
 
     if DoesEntityExist(vehicle) then
         local driver = GetPedInVehicleSeat(vehicle, -1)
-        if driver ~= 0 and DoesEntityExist(driver) and not IsPedAPlayer(driver) then
+        if not skipAmbientRestore and driver ~= 0 and DoesEntityExist(driver) and not IsPedAPlayer(driver) then
             if ClearPath.TryControl(vehicle) and ClearPath.TryControl(driver) then
                 restoreAmbientDriver(driver, vehicle)
             end
@@ -164,7 +308,16 @@ end
 local function releaseAll(reason)
     local vehicles = {}
     for vehicle in pairs(yieldStates) do vehicles[#vehicles + 1] = vehicle end
-    for _, vehicle in ipairs(vehicles) do releaseVehicle(vehicle, reason) end
+    for _, vehicle in ipairs(vehicles) do
+        local skipAmbientRestore = false
+        if DoesEntityExist(vehicle) then
+            local driver = GetPedInVehicleSeat(vehicle, -1)
+            if driver ~= 0 and DoesEntityExist(driver) and not IsPedAPlayer(driver) then
+                skipAmbientRestore = isProtectedFromClearPath(vehicle, driver)
+            end
+        end
+        releaseVehicle(vehicle, reason, skipAmbientRestore)
+    end
 end
 
 local function applyYieldTask(vehicle, driver, state, requestedSpeed)
@@ -267,6 +420,13 @@ local function updateYieldState(vehicle, state, activeEmergencyVehicle)
     local driver = GetPedInVehicleSeat(vehicle, -1)
     if driver == 0 or driver ~= state.driver or not DoesEntityExist(driver) or IsPedAPlayer(driver) then
         yieldStates[vehicle] = nil
+        return
+    end
+
+    -- If ERS (or another resource) takes ownership of this NPC after ClearPath already
+    -- started yielding it, immediately stop issuing ClearPath tasks and return control.
+    if isProtectedFromClearPath(vehicle, driver) then
+        releaseVehicle(vehicle, 'protected/scripted entity', true)
         return
     end
 
@@ -398,9 +558,7 @@ end
 CreateThread(function()
     cacheEmergencyModels()
 
-    if Config.UseNativeSirenReactionOverride and type(OverrideReactionToVehicleSiren) == 'function' then
-        OverrideReactionToVehicleSiren(true, Config.NativeSirenReaction)
-    end
+    updateNativeSirenOverride()
 
     while true do
         updateDebugVehicleStatus()
@@ -437,11 +595,21 @@ end)
 
 CreateThread(function()
     while true do
+        updateNativeSirenOverride()
+        cleanupProtectedNetIds()
+        debugStats.nightERS = isNightERSRunning()
+        debugStats.protected = countProtectedNetIds()
+        Wait(1000)
+    end
+end)
+
+CreateThread(function()
+    while true do
         if not Config.Debug then
             Wait(400)
         else
             updateDebugVehicleStatus()
-            ClearPath.DrawText(0.015, 0.030, 'ClearPath AI v0.1.3 DEBUG', 0.34)
+            ClearPath.DrawText(0.015, 0.030, 'ClearPath AI v0.1.4 DEBUG', 0.34)
             ClearPath.DrawText(0.015, 0.052, ('Vehicle: %s  class: %s  emergency: %s'):format(
                 debugStats.emergencyVehicle,
                 debugStats.emergencyClass,
@@ -452,6 +620,9 @@ CreateThread(function()
             ), 0.30)
             ClearPath.DrawText(0.015, 0.092, ('pool: %d  valid AI: %d  relevant: %d  yielding: %d  control failures: %d'):format(
                 debugStats.pool, debugStats.valid, debugStats.relevant, countYieldStates(), debugStats.controlFail
+            ), 0.30)
+            ClearPath.DrawText(0.015, 0.112, ('Night ERS: %s  protected net IDs: %d  global siren override: %s'):format(
+                tostring(isNightERSRunning()), countProtectedNetIds(), tostring(nativeOverrideApplied)
             ), 0.30)
 
             for vehicle, state in pairs(yieldStates) do
@@ -511,12 +682,62 @@ RegisterNetEvent('smart_emergency_traffic:setForcedActive', function(active)
     forcedActive = active == true
 end)
 
+-- Generic compatibility API. Other resources can protect a scripted vehicle/ped
+-- from ClearPath without adding a hard dependency.
+exports('SetEntityProtected', function(entity, protected, durationMs)
+    return setEntityProtected(entity, protected == true, durationMs)
+end)
+
+exports('SetNetIdProtected', function(netId, protected, durationMs)
+    return setNetIdProtected(netId, protected == true, durationMs)
+end)
+
+exports('IsEntityProtected', function(entity)
+    if entity == 0 or not DoesEntityExist(entity) then return false end
+    local driver = IsEntityAVehicle(entity) and GetPedInVehicleSeat(entity, -1) or entity
+    return isProtectedFromClearPath(entity, driver)
+end)
+
+RegisterNetEvent('clearpath_ai:setProtectedNetId', function(netId, protected, durationMs)
+    setNetIdProtected(netId, protected == true, durationMs)
+end)
+
+-- Night ERS integration: the server relays the documented pursuit lifecycle event.
+-- Protecting the suspect PED is enough; ClearPath checks both the driver and vehicle.
+RegisterNetEvent('clearpath_ai:ersPursuitPed', function(pedNetId, protected)
+    setNetIdProtected(pedNetId, protected == true, 0)
+
+    if pedNetId and NetworkDoesEntityExistWithNetworkId(pedNetId) then
+        local ped = NetworkGetEntityFromNetworkId(pedNetId)
+        if ped ~= 0 and DoesEntityExist(ped) then
+            setEntityProtected(ped, protected == true, 0)
+            if IsPedInAnyVehicle(ped, false) then
+                local vehicle = GetVehiclePedIsIn(ped, false)
+                if vehicle ~= 0 then setEntityProtected(vehicle, protected == true, 0) end
+            end
+        end
+    end
+end)
+
+RegisterNetEvent('clearpath_ai:protectedSnapshot', function(netIds)
+    if type(netIds) ~= 'table' then return end
+    for _, netId in ipairs(netIds) do
+        setNetIdProtected(netId, true, 0)
+    end
+end)
+
+CreateThread(function()
+    Wait(1500)
+    TriggerServerEvent('clearpath_ai:requestProtectedSnapshot')
+end)
+
 AddEventHandler('onResourceStop', function(resourceName)
     if resourceName ~= GetCurrentResourceName() then return end
 
     releaseAll('resource stop')
 
-    if Config.UseNativeSirenReactionOverride and type(OverrideReactionToVehicleSiren) == 'function' then
+    if nativeOverrideApplied and type(OverrideReactionToVehicleSiren) == 'function' then
         OverrideReactionToVehicleSiren(false, Config.NativeSirenReaction)
+        nativeOverrideApplied = false
     end
 end)
