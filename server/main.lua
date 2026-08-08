@@ -1,3 +1,14 @@
+local RESOURCE_NAME = GetCurrentResourceName()
+local RESOURCE_VERSION = GetResourceMetadata(RESOURCE_NAME, 'version', 0) or 'unknown'
+
+local STARTUP_DIVIDER = '=================================================================='
+
+print(('^1%s^7'):format(STARTUP_DIVIDER))
+print(('^3ClearPath AI^7 | Version ^2v%s^7'):format(RESOURCE_VERSION))
+print('^5Intelligent Emergency Traffic Yielding^7')
+print('^2Resource started successfully.^7')
+print(('^1%s^7'):format(STARTUP_DIVIDER))
+
 local protectedPursuitPeds = {}
 
 local function extractNetId(payload)

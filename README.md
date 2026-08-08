@@ -2,6 +2,19 @@
 
 Standalone FiveM resource that improves ambient AI traffic behaviour around responding emergency vehicles.
 
+## v0.1.6 — Startup version logging
+
+- Adds a server-console startup message showing the installed ClearPath AI version.
+- The displayed version is read directly from `fxmanifest.lua`, so the manifest remains the single version source.
+- Keeps all v0.1.4 Night ERS compatibility and v0.1.3 yielding behaviour unchanged.
+
+Example server log:
+
+```text
+[ClearPath AI] Version v0.1.6
+[ClearPath AI] Started successfully (clearpath_ai)
+```
+
 ## v0.1.4 — Night ERS compatibility
 
 This patch keeps ClearPath focused on **ordinary ambient traffic** and prevents it from taking over AI that is already being controlled by Nights Software Emergency Response Simulator (ERS) or another gameplay resource.
