@@ -237,6 +237,50 @@ function ClearPath.BuildJunctionPlan(vehicle, emergencyVehicle)
     }
 end
 
+function ClearPath.GetIndicatorState(vehicle)
+    if vehicle == 0 or not DoesEntityExist(vehicle) or type(GetVehicleIndicatorLights) ~= 'function' then
+        return 0
+    end
+
+    -- Some GTA vehicles can return extra flag bits (for example 64+). The low two
+    -- bits are the indicator state: 0 none, 1 left, 2 right, 3 both/hazards.
+    local state = tonumber(GetVehicleIndicatorLights(vehicle)) or 0
+    return state % 4
+end
+
+function ClearPath.GetJunctionAheadDistance(vehicle, maxDistance, step)
+    if vehicle == 0 or not DoesEntityExist(vehicle) then return nil end
+
+    local coords = GetEntityCoords(vehicle)
+    local heading = GetEntityHeading(vehicle)
+    local forward = ClearPath.ForwardFromHeading(heading)
+    local limit = maxDistance or Config.TurnLaneDetectionDistance or 55.0
+    local increment = math.max(step or Config.TurnLaneSampleStep or 4.0, 1.0)
+
+    local distance = 0.0
+    while distance <= limit do
+        local sample = vector3(
+            coords.x + (forward.x * distance),
+            coords.y + (forward.y * distance),
+            coords.z
+        )
+        if ClearPath.IsJunctionAt(sample) then
+            return distance
+        end
+        distance = distance + increment
+    end
+
+    return nil
+end
+
+function ClearPath.GetTargetLateralShift(vehicle, target)
+    if vehicle == 0 or not DoesEntityExist(vehicle) or not target then return 0.0 end
+    local coords = GetEntityCoords(vehicle)
+    local right = ClearPath.RightFromHeading(GetEntityHeading(vehicle))
+    local delta = vector3(target.x - coords.x, target.y - coords.y, 0.0)
+    return ClearPath.Dot2D(delta, right)
+end
+
 function ClearPath.BuildYieldTarget(vehicle, profile)
     local coords = GetEntityCoords(vehicle)
     local vehicleHeading = GetEntityHeading(vehicle)

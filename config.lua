@@ -65,6 +65,21 @@ Config.JunctionWaitApproachSpeed = 5.0
 Config.JunctionClearSpeed = 10.5
 Config.JunctionTaskRefreshMs = 650
 
+-- Turn-lane/lane-preservation protection. Near junctions, ClearPath must not make
+-- an AI vehicle cross several live lanes just to reach the right shoulder. Vehicles
+-- signalling left, or vehicles whose calculated shoulder target would require an
+-- unsafe multi-lane right shift, keep their existing ambient route/turn task and
+-- simply reduce speed until the emergency vehicle is clear.
+Config.TurnLaneProtectionEnabled = true
+Config.TurnLaneDetectionDistance = 58.0
+Config.TurnLaneSampleStep = 4.0
+Config.TurnLaneUnsafeExtraRightShift = 2.75
+Config.TurnLanePreserveSpeed = 5.0
+Config.TurnLaneRefreshMs = 700
+Config.TurnLaneHeadingRelease = 38.0
+Config.TurnLaneReleaseDistance = 28.0
+Config.TurnIntentMemoryMs = 2200
+
 -- Roadside target sampling.
 Config.CarAheadDistance = 34.0
 Config.HeavyAheadDistance = 46.0
@@ -125,9 +140,10 @@ Config.HeavyVehicleClasses = {
     [20] = true, -- Commercial
 }
 
--- FiveM/Cfx siren-reaction override. This is a fallback/assist; ClearPath still
--- applies its own earlier predictive tasks to relevant AI traffic.
-Config.UseNativeSirenReactionOverride = true
+-- FiveM/Cfx global siren-reaction override. Disabled by default because the global
+-- right-pull reaction can fight lane-aware turn/junction handling. ClearPath's own
+-- per-vehicle predictive tasks handle ambient traffic instead.
+Config.UseNativeSirenReactionOverride = false
 Config.NativeSirenReaction = 1 -- 0 left, 1 right, 2 stop
 
 -- Compatibility safeguards. ClearPath should only manage ordinary ambient traffic,

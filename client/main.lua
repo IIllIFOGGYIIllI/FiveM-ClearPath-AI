@@ -5,6 +5,7 @@ local forcedActive = false
 local protectedNetIds = {}
 local localProtectedEntities = {}
 local nativeOverrideApplied = false
+local leftTurnIntentMemory = {}
 local RESOURCE_VERSION = GetResourceMetadata(GetCurrentResourceName(), 'version', 0) or 'unknown'
 
 
@@ -173,6 +174,62 @@ local function getSirenStates(vehicle)
     return IsVehicleSirenOn(vehicle), IsVehicleSirenAudioOn(vehicle)
 end
 
+local function hasRecentLeftTurnIntent(vehicle)
+    if vehicle == 0 or not DoesEntityExist(vehicle) then return false end
+
+    local now = GetGameTimer()
+    local indicatorState = ClearPath.GetIndicatorState(vehicle)
+
+    if indicatorState == 1 then
+        -- Indicators blink, so remember a recently observed left signal across the
+        -- off phase instead of missing the turn intent on an unlucky scan frame.
+        leftTurnIntentMemory[vehicle] = now + Config.TurnIntentMemoryMs
+        return true
+    elseif indicatorState == 2 or indicatorState == 3 then
+        -- A definite right signal or hazards is not a left-turn instruction.
+        leftTurnIntentMemory[vehicle] = nil
+        return false
+    end
+
+    local expiresAt = leftTurnIntentMemory[vehicle]
+    if expiresAt and expiresAt > now then
+        return true
+    end
+
+    leftTurnIntentMemory[vehicle] = nil
+    return false
+end
+
+local function shouldPreserveTurnLane(vehicle, target, profile)
+    if not Config.TurnLaneProtectionEnabled then return false end
+
+    local junctionDistance = ClearPath.GetJunctionAheadDistance(
+        vehicle,
+        Config.TurnLaneDetectionDistance,
+        Config.TurnLaneSampleStep
+    )
+    if junctionDistance == nil then return false end
+
+    if hasRecentLeftTurnIntent(vehicle) then
+        return true, 'left indicator', junctionDistance
+    end
+
+    if target then
+        local lateralShift = ClearPath.GetTargetLateralShift(vehicle, target)
+        local allowedShift = profile.pullOverOffset + Config.TurnLaneUnsafeExtraRightShift
+
+        -- If the shoulder target requires substantially more rightward travel than
+        -- the normal pull-over offset, the vehicle is probably separated from the
+        -- shoulder by another live lane (very common for dedicated left-turn lanes).
+        -- Preserve its existing route rather than making it cut across traffic.
+        if lateralShift > allowedShift then
+            return true, 'multi-lane right shift', junctionDistance
+        end
+    end
+
+    return false
+end
+
 local function isEmergencySystemActive(vehicle)
     if forcedActive then return true end
 
@@ -296,6 +353,17 @@ local function restoreAmbientDriver(driver, vehicle)
     TaskVehicleDriveWander(driver, vehicle, Config.RejoinSpeed, Config.DrivingStyle)
 end
 
+local function restorePreservedDriver(driver)
+    -- Turn-lane preservation never replaces the NPC's original route/turn task.
+    -- Release our temporary speed/event limits without issuing DriveWander, which
+    -- would erase the left-turn route we deliberately preserved.
+    SetBlockingOfNonTemporaryEvents(driver, false)
+    SetPedKeepTask(driver, false)
+    SetDriveTaskCruiseSpeed(driver, Config.RejoinSpeed)
+    SetDriveTaskMaxCruiseSpeed(driver, Config.RejoinSpeed)
+    SetDriveTaskDrivingStyle(driver, Config.DrivingStyle)
+end
+
 local function releaseVehicle(vehicle, reason, skipAmbientRestore)
     local state = yieldStates[vehicle]
     if not state then return end
@@ -304,7 +372,11 @@ local function releaseVehicle(vehicle, reason, skipAmbientRestore)
         local driver = GetPedInVehicleSeat(vehicle, -1)
         if not skipAmbientRestore and driver ~= 0 and DoesEntityExist(driver) and not IsPedAPlayer(driver) then
             if ClearPath.TryControl(vehicle) and ClearPath.TryControl(driver) then
-                restoreAmbientDriver(driver, vehicle)
+                if state.preserveAmbientTask then
+                    restorePreservedDriver(driver)
+                else
+                    restoreAmbientDriver(driver, vehicle)
+                end
             end
         end
     end
@@ -327,6 +399,15 @@ local function releaseAll(reason)
         end
         releaseVehicle(vehicle, reason, skipAmbientRestore)
     end
+end
+
+local function applyTurnLanePreserve(driver, state)
+    SetBlockingOfNonTemporaryEvents(driver, true)
+    SetPedKeepTask(driver, true)
+    SetDriveTaskDrivingStyle(driver, Config.DrivingStyle)
+    SetDriveTaskCruiseSpeed(driver, Config.TurnLanePreserveSpeed)
+    SetDriveTaskMaxCruiseSpeed(driver, Config.TurnLanePreserveSpeed)
+    state.lastTaskAt = GetGameTimer()
 end
 
 local function applyYieldTask(vehicle, driver, state, requestedSpeed)
@@ -379,19 +460,30 @@ local function assignYield(vehicle, driver, emergencyVehicle, profile)
 
     local junctionPlan = ClearPath.BuildJunctionPlan(vehicle, emergencyVehicle)
     local target, targetHeading
+    local turnLanePreserve = false
+    local turnLaneReason = nil
 
     if junctionPlan then
         target = junctionPlan.target
         targetHeading = junctionPlan.targetHeading
     else
         target, targetHeading = ClearPath.BuildYieldTarget(vehicle, profile)
-    end
+        if not target then return end
 
-    if not target then return end
+        turnLanePreserve, turnLaneReason = shouldPreserveTurnLane(vehicle, target, profile)
+        if turnLanePreserve then
+            -- Keep GTA's existing route/turn task. There is intentionally no
+            -- replacement coordinate target in this mode.
+            target = nil
+            targetHeading = nil
+        end
+    end
 
     local initialState = 'YIELDING'
     if junctionPlan then
         initialState = junctionPlan.mode == 'clear' and 'JUNCTION_CLEARING' or 'JUNCTION_WAIT_APPROACH'
+    elseif turnLanePreserve then
+        initialState = 'TURN_LANE_PRESERVE'
     end
 
     local state = {
@@ -402,8 +494,11 @@ local function assignYield(vehicle, driver, emergencyVehicle, profile)
         targetHeading = targetHeading,
         state = initialState,
         junctionMode = junctionPlan and junctionPlan.mode or nil,
+        turnLaneMode = turnLanePreserve,
+        turnLaneReason = turnLaneReason,
+        preserveAmbientTask = turnLanePreserve,
         conflictPoint = junctionPlan and junctionPlan.conflictPoint or nil,
-        vehicleHeading = junctionPlan and junctionPlan.vehicleHeading or nil,
+        vehicleHeading = junctionPlan and junctionPlan.vehicleHeading or (turnLanePreserve and GetEntityHeading(vehicle) or nil),
         emergencyHeading = junctionPlan and junctionPlan.emergencyHeading or nil,
         assignedAt = now,
         lastRelevantAt = now,
@@ -414,16 +509,24 @@ local function assignYield(vehicle, driver, emergencyVehicle, profile)
 
     yieldStates[vehicle] = state
 
-    local initialSpeed = nil
-    if state.state == 'JUNCTION_CLEARING' then
-        initialSpeed = Config.JunctionClearSpeed
-    elseif state.state == 'JUNCTION_WAIT_APPROACH' then
-        initialSpeed = Config.JunctionWaitApproachSpeed
+    if state.state == 'TURN_LANE_PRESERVE' then
+        applyTurnLanePreserve(driver, state)
+    else
+        local initialSpeed = nil
+        if state.state == 'JUNCTION_CLEARING' then
+            initialSpeed = Config.JunctionClearSpeed
+        elseif state.state == 'JUNCTION_WAIT_APPROACH' then
+            initialSpeed = Config.JunctionWaitApproachSpeed
+        end
+        applyYieldTask(vehicle, driver, state, initialSpeed)
     end
 
-    applyYieldTask(vehicle, driver, state, initialSpeed)
     debugStats.assigned = debugStats.assigned + 1
-    ClearPath.Debug(('assigned %s vehicle %s'):format(profile.kind, vehicle))
+    ClearPath.Debug(('assigned %s vehicle %s%s'):format(
+        profile.kind,
+        vehicle,
+        turnLanePreserve and (' [lane preserved: ' .. (turnLaneReason or 'junction') .. ']') or ''
+    ))
 end
 
 local function scanTraffic(emergencyVehicle)
@@ -456,6 +559,7 @@ local function updateYieldState(vehicle, state, activeEmergencyVehicle)
     if not DoesEntityExist(vehicle) then
         yieldStates[vehicle] = nil
         cooldowns[vehicle] = nil
+        leftTurnIntentMemory[vehicle] = nil
         return
     end
 
@@ -615,6 +719,36 @@ local function updateYieldState(vehicle, state, activeEmergencyVehicle)
         return
     end
 
+    if state.state == 'TURN_LANE_PRESERVE' then
+        if not ClearPath.TryControl(vehicle) or not ClearPath.TryControl(driver) then return end
+
+        local headingChange = math.abs(ClearPath.HeadingDelta(GetEntityHeading(vehicle), state.vehicleHeading))
+        local junctionAhead = ClearPath.GetJunctionAheadDistance(
+            vehicle,
+            Config.TurnLaneDetectionDistance,
+            Config.TurnLaneSampleStep
+        )
+
+        -- Once the vehicle has actually turned away from the responder's route, or
+        -- has moved beyond the junction, stop constraining it immediately. Its
+        -- original ambient navigation task is still intact and can continue normally.
+        if headingChange >= Config.TurnLaneHeadingRelease
+            and distanceFromEmergency >= Config.TurnLaneReleaseDistance then
+            releaseVehicle(vehicle, 'turn lane cleared path')
+            return
+        end
+
+        if junctionAhead == nil and distanceFromEmergency >= Config.TurnLaneReleaseDistance then
+            releaseVehicle(vehicle, 'junction passed')
+            return
+        end
+
+        if now - state.lastTaskAt >= Config.TurnLaneRefreshMs then
+            applyTurnLanePreserve(driver, state)
+        end
+        return
+    end
+
     if not ClearPath.TryControl(vehicle) or not ClearPath.TryControl(driver) then return end
 
     if state.state == 'YIELDING' then
@@ -764,8 +898,12 @@ CreateThread(function()
             for vehicle, state in pairs(yieldStates) do
                 if DoesEntityExist(vehicle) then
                     local vc = GetEntityCoords(vehicle)
-                    DrawLine(vc.x, vc.y, vc.z + 1.0, state.target.x, state.target.y, state.target.z + 0.5, 255, 255, 255, 180)
-                    DrawMarker(1, state.target.x, state.target.y, state.target.z - 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.5, 255, 255, 255, 130, false, false, 2, false, nil, nil, false)
+                    if state.target then
+                        DrawLine(vc.x, vc.y, vc.z + 1.0, state.target.x, state.target.y, state.target.z + 0.5, 255, 255, 255, 180)
+                        DrawMarker(1, state.target.x, state.target.y, state.target.z - 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.5, 255, 255, 255, 130, false, false, 2, false, nil, nil, false)
+                    else
+                        DrawMarker(1, vc.x, vc.y, vc.z - 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.8, 0.8, 0.35, 255, 255, 255, 100, false, false, 2, false, nil, nil, false)
+                    end
                 end
             end
             Wait(0)
@@ -775,7 +913,7 @@ end)
 
 local function toggleDebug()
     Config.Debug = not Config.Debug
-    print(('[clearpath_ai] Debug %s'):format(Config.Debug and 'ENABLED' or 'DISABLED'))
+    print(('[ClearPath_AI] Debug %s'):format(Config.Debug and 'ENABLED' or 'DISABLED'))
 end
 
 RegisterCommand(Config.DebugCommand, toggleDebug, false)
@@ -783,13 +921,13 @@ RegisterCommand(Config.LegacyDebugCommand, toggleDebug, false)
 
 RegisterCommand(Config.ForceCommand, function()
     forcedActive = not forcedActive
-    print(('[clearpath_ai] Forced activation %s'):format(forcedActive and 'ENABLED' or 'DISABLED'))
+    print(('[ClearPath_AI] Forced activation %s'):format(forcedActive and 'ENABLED' or 'DISABLED'))
 end, false)
 
 RegisterCommand(Config.StatusCommand, function()
     updateDebugVehicleStatus()
     local vehicle = debugStats.emergencyVehicle
-    print(('[clearpath_ai] status vehicle=%s class=%s emergency=%s warning=%s audio=%s forced=%s active=%s yielding=%d'):format(
+    print(('[ClearPath_AI] status vehicle=%s class=%s emergency=%s warning=%s audio=%s forced=%s active=%s yielding=%d'):format(
         vehicle,
         debugStats.emergencyClass,
         tostring(vehicle ~= 0 and isEmergencyVehicle(vehicle) or false),
