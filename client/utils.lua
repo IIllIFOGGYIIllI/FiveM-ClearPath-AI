@@ -27,6 +27,54 @@ function ClearPath.RightFromHeading(heading)
     return vector3(math.cos(r), math.sin(r), 0.0)
 end
 
+
+function ClearPath.Dot2D(a, b)
+    return (a.x * b.x) + (a.y * b.y)
+end
+
+function ClearPath.Cross2D(a, b)
+    return (a.x * b.y) - (a.y * b.x)
+end
+
+-- Returns the forward-path intersection between two vehicles. Distances are in
+-- metres along each vehicle's current heading. This lets ClearPath distinguish
+-- ordinary same-direction traffic from cross-traffic that is about to occupy the
+-- responder's path through a junction.
+function ClearPath.GetForwardPathIntersection(entityA, entityB, maxDistanceA, maxDistanceB)
+    if entityA == 0 or entityB == 0 or not DoesEntityExist(entityA) or not DoesEntityExist(entityB) then
+        return nil
+    end
+
+    local a = GetEntityCoords(entityA)
+    local b = GetEntityCoords(entityB)
+    local r = ClearPath.ForwardFromHeading(GetEntityHeading(entityA))
+    local s = ClearPath.ForwardFromHeading(GetEntityHeading(entityB))
+    local denominator = ClearPath.Cross2D(r, s)
+
+    if math.abs(denominator) < 0.05 then return nil end
+
+    local qmp = vector3(b.x - a.x, b.y - a.y, 0.0)
+    local distanceA = ClearPath.Cross2D(qmp, s) / denominator
+    local distanceB = ClearPath.Cross2D(qmp, r) / denominator
+
+    if distanceA < 0.0 or distanceB < 0.0 then return nil end
+    if maxDistanceA and distanceA > maxDistanceA then return nil end
+    if maxDistanceB and distanceB > maxDistanceB then return nil end
+
+    return vector3(
+        a.x + (r.x * distanceA),
+        a.y + (r.y * distanceA),
+        (a.z + b.z) * 0.5
+    ), distanceA, distanceB
+end
+
+function ClearPath.GetForwardProgressFromPoint(entity, point, heading)
+    local coords = GetEntityCoords(entity)
+    local forward = ClearPath.ForwardFromHeading(heading or GetEntityHeading(entity))
+    local delta = vector3(coords.x - point.x, coords.y - point.y, 0.0)
+    return ClearPath.Dot2D(delta, forward)
+end
+
 function ClearPath.Debug(message)
     if Config.Debug then
         print(('[clearpath_ai] %s'):format(message))
@@ -102,6 +150,90 @@ function ClearPath.GetVehicleProfile(vehicle)
         finalYieldSpeed = Config.CarFinalYieldSpeed,
         releaseBehindDistance = Config.CarReleaseBehindDistance,
         postPassHoldMs = Config.CarPostPassHoldMs,
+    }
+end
+
+
+function ClearPath.BuildJunctionPlan(vehicle, emergencyVehicle)
+    if not Config.JunctionControlEnabled then return nil end
+
+    local vehicleHeading = GetEntityHeading(vehicle)
+    local emergencyHeading = GetEntityHeading(emergencyVehicle)
+    local headingDifference = math.abs(ClearPath.HeadingDelta(vehicleHeading, emergencyHeading))
+
+    -- Only special-case genuine crossing traffic. Same-direction and opposing
+    -- traffic continue to use the normal right-side shoulder-yield behaviour.
+    if headingDifference < Config.JunctionCrossingMinAngle
+        or headingDifference > Config.JunctionCrossingMaxAngle then
+        return nil
+    end
+
+    local conflictPoint, emergencyDistance, vehicleDistance = ClearPath.GetForwardPathIntersection(
+        emergencyVehicle,
+        vehicle,
+        Config.JunctionEmergencyApproachDistance,
+        Config.JunctionCrossTrafficApproachDistance
+    )
+
+    if not conflictPoint then return nil end
+
+    local vehicleCoords = GetEntityCoords(vehicle)
+    local emergencyCoords = GetEntityCoords(emergencyVehicle)
+    local nearJunction = ClearPath.IsJunctionAt(conflictPoint)
+        or ClearPath.IsJunctionAt(vehicleCoords)
+        or ClearPath.IsJunctionAt(emergencyCoords)
+
+    if not nearJunction then return nil end
+
+    local forward = ClearPath.ForwardFromHeading(vehicleHeading)
+    local speed = GetEntitySpeed(vehicle)
+    local committedDistance = Config.JunctionCommittedDistance
+
+    if speed >= Config.JunctionCommitSpeed then
+        committedDistance = committedDistance + Config.JunctionMovingCommitExtraDistance
+    end
+
+    local committed = vehicleDistance <= committedDistance
+
+    if committed then
+        local clearDistance = vehicleDistance + Config.JunctionClearBeyondConflictDistance
+        local target = vector3(
+            vehicleCoords.x + (forward.x * clearDistance),
+            vehicleCoords.y + (forward.y * clearDistance),
+            vehicleCoords.z
+        )
+
+        return {
+            mode = 'clear',
+            target = target,
+            targetHeading = vehicleHeading,
+            conflictPoint = conflictPoint,
+            vehicleHeading = vehicleHeading,
+            emergencyHeading = emergencyHeading,
+            emergencyDistance = emergencyDistance,
+            vehicleDistance = vehicleDistance,
+        }
+    end
+
+    -- Keep the vehicle on its own current travel line and stop it before the
+    -- projected conflict point. Do not offset it toward the kerb while it is
+    -- approaching/crossing a junction.
+    local travelToStop = math.max(vehicleDistance - Config.JunctionStopBuffer, Config.JunctionMinimumStopTravel)
+    local stopTarget = vector3(
+        vehicleCoords.x + (forward.x * travelToStop),
+        vehicleCoords.y + (forward.y * travelToStop),
+        vehicleCoords.z
+    )
+
+    return {
+        mode = 'wait',
+        target = stopTarget,
+        targetHeading = vehicleHeading,
+        conflictPoint = conflictPoint,
+        vehicleHeading = vehicleHeading,
+        emergencyHeading = emergencyHeading,
+        emergencyDistance = emergencyDistance,
+        vehicleDistance = vehicleDistance,
     }
 end
 

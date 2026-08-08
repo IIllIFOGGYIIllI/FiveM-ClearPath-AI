@@ -43,6 +43,28 @@ Config.CorridorGrowth = 0.34
 Config.CorridorMaxWidth = 72.0
 Config.VerticalTolerance = 10.0
 
+
+-- Junction conflict management. Cross-traffic is handled differently from normal
+-- lane traffic: vehicles that have not entered the conflict area wait before it,
+-- while vehicles already committed are instructed to clear through instead of
+-- stopping broadside in the responder's lane.
+Config.JunctionControlEnabled = true
+Config.JunctionCrossingMinAngle = 50.0
+Config.JunctionCrossingMaxAngle = 130.0
+Config.JunctionEmergencyApproachDistance = 115.0
+Config.JunctionCrossTrafficApproachDistance = 70.0
+Config.JunctionCommittedDistance = 6.0
+Config.JunctionCommitSpeed = 5.0
+Config.JunctionMovingCommitExtraDistance = 10.0
+Config.JunctionStopBuffer = 9.0
+Config.JunctionMinimumStopTravel = 2.0
+Config.JunctionClearBeyondConflictDistance = 24.0
+Config.JunctionClearReleaseDistance = 14.0
+Config.JunctionEmergencyClearDistance = 20.0
+Config.JunctionWaitApproachSpeed = 5.0
+Config.JunctionClearSpeed = 10.5
+Config.JunctionTaskRefreshMs = 650
+
 -- Roadside target sampling.
 Config.CarAheadDistance = 34.0
 Config.HeavyAheadDistance = 46.0

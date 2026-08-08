@@ -3,7 +3,7 @@ game 'gta5'
 
 author 'IIIIFOGGYIIII'
 description 'Standalone predictive AI traffic yielding for emergency vehicles.'
-version '0.1.6'
+version '0.1.7'
 
 shared_script 'config.lua'
 

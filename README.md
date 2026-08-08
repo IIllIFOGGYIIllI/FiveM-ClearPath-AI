@@ -2,35 +2,32 @@
 
 Standalone FiveM resource that improves ambient AI traffic behaviour around responding emergency vehicles.
 
-## v0.1.6 — Startup version logging
+## v0.1.7 — Junction conflict handling
 
-- Adds a server-console startup message showing the installed ClearPath AI version.
-- The displayed version is read directly from `fxmanifest.lua`, so the manifest remains the single version source.
-- Keeps all v0.1.4 Night ERS compatibility and v0.1.3 yielding behaviour unchanged.
+This patch fixes cross-traffic entering or stopping broadside in front of an approaching emergency vehicle at intersections.
 
-Example server log:
+### Junction behaviour
 
-```text
-[ClearPath AI] Version v0.1.6
-[ClearPath AI] Started successfully (clearpath_ai)
-```
+- Predicts where the emergency vehicle's current path and cross-traffic path intersect.
+- Detects cross-traffic earlier even when it sits outside the normal forward traffic corridor.
+- Vehicles that still have room are instructed to **wait before the conflict point** instead of entering the intersection.
+- Vehicles that are already committed are instructed to **continue through and clear the intersection** instead of braking or attempting a roadside pull-over in the responder's lane.
+- If a waiting vehicle rolls too far forward and becomes committed, ClearPath automatically changes it to a clear-through manoeuvre rather than stopping it broadside.
+- Cross-traffic is released after the responder has safely cleared the conflict point.
+- Normal same-direction, opposing, highway and shoulder-yield behaviour remains unchanged.
 
-## v0.1.4 — Night ERS compatibility
+The junction behaviour is configurable in `config.lua` under the `Config.Junction...` settings.
 
-This patch keeps ClearPath focused on **ordinary ambient traffic** and prevents it from taking over AI that is already being controlled by Nights Software Emergency Response Simulator (ERS) or another gameplay resource.
+## Existing behaviour
 
-### Night ERS safeguards
-
-- Detects `night_ers` automatically when the resource is running.
-- Protects ERS/scripted mission vehicles and drivers from ClearPath tasks.
-- Protects fleeing ERS drivers as a pursuit-safe fallback.
-- Protects drivers actively in combat with the player.
-- Listens for the documented `ErsIntegration::OnPursuitStarted` and `ErsIntegration::OnPursuitEnded` lifecycle events and synchronizes the protected suspect network ID to nearby/all ClearPath clients when an ID is available.
-- If a vehicle becomes protected **after** ClearPath already started yielding it, ClearPath immediately releases that vehicle and stops replacing its driving task.
-- Disables ClearPath's global Cfx siren-reaction override while Night ERS is running. This is important because that native affects pedestrian-driven traffic globally; normal ambient traffic still receives ClearPath's own per-vehicle predictive yield tasks.
-- Adds generic protection exports so other scripts can mark their own scripted peds/vehicles as off-limits to ClearPath.
-
-This means an ERS pursuit suspect should continue fleeing normally instead of suddenly trying to pull onto the shoulder because the pursuing police vehicle has a siren active.
+- Early predictive yielding for normal AI road traffic.
+- Separate profiles for cars, heavy vehicles, and vehicles towing trailers.
+- More complete shoulder positioning and a slower final pull-over phase.
+- Delayed merge-back so vehicles do not re-enter the lane while the responder is still passing.
+- Night ERS compatibility safeguards for pursuits/callouts/scripted AI.
+- Generic compatibility exports so other resources can protect their own scripted entities.
+- Debug commands for live traffic/yield diagnostics.
+- Startup version banner in the server console, with the version read directly from `fxmanifest.lua`.
 
 ## Install
 
@@ -55,15 +52,29 @@ ensure clearpath_ai
 
 ClearPath does **not** require Night ERS; the integration is optional and detected automatically.
 
-## Debug
+## Startup log
 
-Use:
+ClearPath prints a startup banner similar to:
+
+```text
+==================================================================
+ClearPath AI | Version v0.1.7
+Intelligent Emergency Traffic Yielding
+Resource started successfully.
+==================================================================
+```
+
+FiveM adds the normal `[script:clearpath_ai]` prefix in the server console.
+
+## Debug
 
 ```text
 /clearpathdebug
+/clearpathstatus
+/clearpathforce
 ```
 
-The debug panel now also shows whether Night ERS is running, how many network IDs are explicitly protected, and whether the global siren-reaction override is active.
+`/clearpathdebug` shows live AI counts, siren state, Night ERS compatibility state and yield targets.
 
 ## Compatibility API
 
@@ -84,8 +95,4 @@ exports['clearpath_ai']:SetProtectedNetId(netId, true)
 exports['clearpath_ai']:SetProtectedNetId(netId, false)
 ```
 
-These hooks let any scripted pursuit/callout resource tell ClearPath not to alter a particular AI entity.
-
-## Current behaviour retained
-
-v0.1.4 retains the v0.1.3 full-shoulder yielding changes, truck/trailer profiles, delayed merge-back behaviour, debug tools and configurable detection distances.
+These hooks let scripted pursuit/callout resources tell ClearPath not to alter a particular AI entity.

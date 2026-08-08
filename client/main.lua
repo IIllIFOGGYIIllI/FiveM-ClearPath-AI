@@ -5,6 +5,7 @@ local forcedActive = false
 local protectedNetIds = {}
 local localProtectedEntities = {}
 local nativeOverrideApplied = false
+local RESOURCE_VERSION = GetResourceMetadata(GetCurrentResourceName(), 'version', 0) or 'unknown'
 
 
 local debugStats = {
@@ -272,12 +273,20 @@ local function isRelevantToEmergency(vehicle, emergencyVehicle, profile)
     local corridorWidth = Config.CorridorBaseWidth + (forwardDistance * Config.CorridorGrowth)
     corridorWidth = ClearPath.Clamp(corridorWidth, Config.CorridorBaseWidth, Config.CorridorMaxWidth)
 
-    if math.abs(relative.x) > corridorWidth then return false end
+    if math.abs(relative.x) > corridorWidth then
+        -- Cross-traffic approaching the same junction can sit outside the normal
+        -- forward corridor until very late. Treat a valid projected junction
+        -- conflict as relevant early so it can stop before entering the crossing.
+        if not ClearPath.BuildJunctionPlan(vehicle, emergencyVehicle) then
+            return false
+        end
+    end
 
     return true, distance, relative
 end
 
 local function restoreAmbientDriver(driver, vehicle)
+    SetVehicleIndicatorLights(vehicle, 0, false)
     SetVehicleIndicatorLights(vehicle, 1, false)
     SetBlockingOfNonTemporaryEvents(driver, false)
     SetPedKeepTask(driver, false)
@@ -321,7 +330,14 @@ local function releaseAll(reason)
 end
 
 local function applyYieldTask(vehicle, driver, state, requestedSpeed)
-    SetVehicleIndicatorLights(vehicle, 1, true)
+    if state.junctionMode then
+        -- Cross-traffic should keep a predictable heading through/at the junction,
+        -- not signal and attempt a roadside manoeuvre while occupying the conflict area.
+        SetVehicleIndicatorLights(vehicle, 0, false)
+        SetVehicleIndicatorLights(vehicle, 1, false)
+    else
+        SetVehicleIndicatorLights(vehicle, 1, true)
+    end
     SetBlockingOfNonTemporaryEvents(driver, true)
     SetPedKeepTask(driver, true)
     SetDriveTaskDrivingStyle(driver, Config.DrivingStyle)
@@ -361,8 +377,22 @@ local function assignYield(vehicle, driver, emergencyVehicle, profile)
         return
     end
 
-    local target, targetHeading = ClearPath.BuildYieldTarget(vehicle, profile)
+    local junctionPlan = ClearPath.BuildJunctionPlan(vehicle, emergencyVehicle)
+    local target, targetHeading
+
+    if junctionPlan then
+        target = junctionPlan.target
+        targetHeading = junctionPlan.targetHeading
+    else
+        target, targetHeading = ClearPath.BuildYieldTarget(vehicle, profile)
+    end
+
     if not target then return end
+
+    local initialState = 'YIELDING'
+    if junctionPlan then
+        initialState = junctionPlan.mode == 'clear' and 'JUNCTION_CLEARING' or 'JUNCTION_WAIT_APPROACH'
+    end
 
     local state = {
         driver = driver,
@@ -370,7 +400,11 @@ local function assignYield(vehicle, driver, emergencyVehicle, profile)
         profile = profile,
         target = target,
         targetHeading = targetHeading,
-        state = 'YIELDING',
+        state = initialState,
+        junctionMode = junctionPlan and junctionPlan.mode or nil,
+        conflictPoint = junctionPlan and junctionPlan.conflictPoint or nil,
+        vehicleHeading = junctionPlan and junctionPlan.vehicleHeading or nil,
+        emergencyHeading = junctionPlan and junctionPlan.emergencyHeading or nil,
         assignedAt = now,
         lastRelevantAt = now,
         lastTaskAt = 0,
@@ -379,7 +413,15 @@ local function assignYield(vehicle, driver, emergencyVehicle, profile)
     }
 
     yieldStates[vehicle] = state
-    applyYieldTask(vehicle, driver, state)
+
+    local initialSpeed = nil
+    if state.state == 'JUNCTION_CLEARING' then
+        initialSpeed = Config.JunctionClearSpeed
+    elseif state.state == 'JUNCTION_WAIT_APPROACH' then
+        initialSpeed = Config.JunctionWaitApproachSpeed
+    end
+
+    applyYieldTask(vehicle, driver, state, initialSpeed)
     debugStats.assigned = debugStats.assigned + 1
     ClearPath.Debug(('assigned %s vehicle %s'):format(profile.kind, vehicle))
 end
@@ -449,6 +491,100 @@ local function updateYieldState(vehicle, state, activeEmergencyVehicle)
         vehicleCoords.y,
         vehicleCoords.z
     )
+
+    -- Junction cross-traffic uses its own conflict-point state machine. A vehicle
+    -- that has room waits before the crossing; one that is already committed keeps
+    -- moving until it is fully beyond the emergency vehicle's projected path.
+    -- This prevents the classic GTA behaviour where traffic stops broadside in the
+    -- middle of the junction when a siren approaches.
+    if state.junctionMode and state.conflictPoint then
+        if not ClearPath.TryControl(vehicle) or not ClearPath.TryControl(driver) then return end
+
+        local vehicleProgress = ClearPath.GetForwardProgressFromPoint(
+            vehicle, state.conflictPoint, state.vehicleHeading
+        )
+        local emergencyProgress = ClearPath.GetForwardProgressFromPoint(
+            activeEmergencyVehicle, state.conflictPoint, state.emergencyHeading
+        )
+
+        if state.state == 'JUNCTION_CLEARING' then
+            if vehicleProgress >= Config.JunctionClearReleaseDistance then
+                releaseVehicle(vehicle, 'junction cleared')
+                return
+            end
+
+            if now - state.lastTaskAt >= Config.JunctionTaskRefreshMs then
+                applyYieldTask(vehicle, driver, state, Config.JunctionClearSpeed)
+            end
+            return
+        end
+
+        if state.state == 'JUNCTION_WAIT_APPROACH' or state.state == 'JUNCTION_WAIT_HOLD' then
+            -- If the vehicle failed to stop in time and becomes committed, never make
+            -- it brake in the conflict zone. Convert immediately to a clear-through
+            -- task and get it out of the responder's path.
+            if vehicleProgress >= -Config.JunctionCommittedDistance then
+                local forward = ClearPath.ForwardFromHeading(state.vehicleHeading)
+                state.target = vector3(
+                    state.conflictPoint.x + (forward.x * Config.JunctionClearBeyondConflictDistance),
+                    state.conflictPoint.y + (forward.y * Config.JunctionClearBeyondConflictDistance),
+                    vehicleCoords.z
+                )
+                state.state = 'JUNCTION_CLEARING'
+                state.junctionMode = 'clear'
+                applyYieldTask(vehicle, driver, state, Config.JunctionClearSpeed)
+                return
+            end
+
+            -- Once the responder is safely through the crossing, normal ambient AI
+            -- can resume. Until then the cross-traffic vehicle remains behind the
+            -- conflict point even if GTA's traffic-light logic wants it to proceed.
+            if emergencyProgress >= Config.JunctionEmergencyClearDistance then
+                releaseVehicle(vehicle, 'responder cleared junction')
+                return
+            end
+
+            local distanceToTarget = ClearPath.Distance(vehicleCoords, state.target)
+            local elapsed = now - state.assignedAt
+
+            if state.state == 'JUNCTION_WAIT_APPROACH' then
+                if now - state.lastTaskAt >= Config.JunctionTaskRefreshMs then
+                    applyYieldTask(vehicle, driver, state, Config.JunctionWaitApproachSpeed)
+                end
+
+                if distanceToTarget <= Config.HoldDistance and elapsed >= Config.MinimumYieldTimeMs then
+                    TaskVehiclePark(
+                        driver,
+                        vehicle,
+                        state.target.x,
+                        state.target.y,
+                        state.target.z,
+                        state.targetHeading,
+                        Config.ParkMode,
+                        Config.ParkRadius,
+                        true
+                    )
+                    state.state = 'JUNCTION_WAIT_HOLD'
+                    state.lastParkRefreshAt = now
+                end
+            elseif now - state.lastParkRefreshAt >= Config.HoldRefreshMs then
+                TaskVehiclePark(
+                    driver,
+                    vehicle,
+                    state.target.x,
+                    state.target.y,
+                    state.target.z,
+                    state.targetHeading,
+                    Config.ParkMode,
+                    Config.ParkRadius,
+                    true
+                )
+                state.lastParkRefreshAt = now
+            end
+
+            return
+        end
+    end
 
     -- Do not release a yielding vehicle merely because the responder has just
     -- moved alongside or slightly ahead of it. Start a pass-confirmation timer once
@@ -609,7 +745,7 @@ CreateThread(function()
             Wait(400)
         else
             updateDebugVehicleStatus()
-            ClearPath.DrawText(0.015, 0.030, 'ClearPath AI v0.1.4 DEBUG', 0.34)
+            ClearPath.DrawText(0.015, 0.030, ('ClearPath AI v%s DEBUG'):format(RESOURCE_VERSION), 0.34)
             ClearPath.DrawText(0.015, 0.052, ('Vehicle: %s  class: %s  emergency: %s'):format(
                 debugStats.emergencyVehicle,
                 debugStats.emergencyClass,
